@@ -10,10 +10,69 @@ import (
 )
 
 type Device struct {
-	bus     drivers.I2C
-	Address uint16
-	buf     [8]uint8
-	mode    byte
+	bus             drivers.I2C
+	Address         uint16
+	buf             [8]uint8
+	temperatureUnit TemperatureUnit
+	angularRateUnit AngularRateUnit
+	accelUnit       AccelUnit
+}
+
+type OperationMode uint8
+
+type AccelRange uint8
+type AccelBandwidth uint8
+type AccelMode uint8
+
+type GyroRange uint8
+type GyroBandwidth uint8
+type GyroMode uint8
+
+type MagRate uint8
+type MagMode uint8
+type MagPower uint8
+
+type AccelUnit uint8
+type AngularRateUnit uint8
+type EulerAngleUnit uint8
+type TemperatureUnit uint8
+
+type FusionDataFormat uint8
+
+type PowerMode uint8
+
+type AxisMapping uint8
+
+type AxisSign uint8
+
+type Configuration struct {
+	OperationMode OperationMode
+
+	AccelRange     AccelRange
+	AccelBandwidth AccelBandwidth
+	AccelMode      AccelMode
+
+	GyroRange     GyroRange
+	GyroBandwidth GyroBandwidth
+	GyroMode      GyroMode
+
+	MagRate  MagRate
+	MagMode  MagMode
+	MagPower MagPower
+
+	AccelUnit       AccelUnit
+	AngularRateUnit AngularRateUnit
+	EulerAngleUnit  EulerAngleUnit
+	TemperatureUnit TemperatureUnit
+
+	FusionDataFormat FusionDataFormat
+
+	AxisMapping AxisMapping
+	AxisSign    AxisSign
+
+	PowerMode PowerMode
+
+	UseExternalClock bool
 }
 
 func New(bus drivers.I2C) Device {
@@ -24,30 +83,90 @@ func New(bus drivers.I2C) Device {
 	}
 }
 
+func DefaultConfig() Configuration {
+	return Configuration{
+		OperationMode:    OPERATION_MODE_NDOF,
+		FusionDataFormat: FUSION_DATA_FORMAT_ANDROID,
+		AxisMapping:      AXIS_X_AS_X | AXIS_Y_AS_Y | AXIS_Z_AS_Z,
+		PowerMode:        POWER_MODE_NORMAL,
+		UseExternalClock: true,
+	}
+}
+
 // Configure sets up the device
-func (d *Device) Configure() {
-	// Config
-	d.bus.WriteRegister(uint8(d.Address), OPR_MODE, []byte{OPERATION_MODE_CONFIG})
-	time.Sleep(30 * time.Millisecond)
-	// Reset
+func (d *Device) Configure(config Configuration) {
+	d.doConfigure(config)
+
+	// Reset interrupt status bits
 	d.bus.WriteRegister(uint8(d.Address), SYS_TRIGGER, []byte{0x20})
 	time.Sleep(60 * time.Millisecond)
 
-	d.bus.WriteRegister(uint8(d.Address), PWR_MODE, []byte{POWER_MODE_NORMAL})
+	// run self test
+	d.bus.WriteRegister(uint8(d.Address), SYS_TRIGGER, []byte{0x00})
+	time.Sleep(10 * time.Millisecond)
+}
+
+func (d *Device) doConfigure(config Configuration) {
+	d.SetMode(OPERATION_MODE_CONFIG)
+
+	// Configure Page 1 registers
+	d.bus.WriteRegister(uint8(d.Address), REG_PAGE_ID, []byte{0x01})
 	time.Sleep(10 * time.Millisecond)
 
+	// Set Accelerometer config
+	d.bus.WriteRegister(uint8(d.Address), ACCEL_CONFIG, []byte{byte(config.AccelRange) | byte(config.AccelBandwidth) | byte(config.AccelMode)})
+	time.Sleep(10 * time.Millisecond)
+
+	// Set Gyro config
+	d.bus.WriteRegister(uint8(d.Address), GYRO_CONFIG_0, []byte{byte(config.GyroRange) | byte(config.GyroBandwidth)})
+	time.Sleep(10 * time.Millisecond)
+	d.bus.WriteRegister(uint8(d.Address), GYRO_CONFIG_1, []byte{byte(config.GyroMode)})
+	time.Sleep(10 * time.Millisecond)
+
+	// Set Magnetometer config
+	d.bus.WriteRegister(uint8(d.Address), MAG_CONFIG, []byte{byte(config.MagRate) | byte(config.MagMode) | byte(config.MagPower)})
+	time.Sleep(10 * time.Millisecond)
+
+	// Configure Page 0 registers
 	d.bus.WriteRegister(uint8(d.Address), REG_PAGE_ID, []byte{0x00})
 	time.Sleep(10 * time.Millisecond)
 
-	d.bus.WriteRegister(uint8(d.Address), SYS_TRIGGER, []byte{0x00})
+	// Set power mode
+	d.bus.WriteRegister(uint8(d.Address), PWR_MODE, []byte{byte(config.PowerMode)})
 	time.Sleep(10 * time.Millisecond)
+
+	// Set Unit selection
+	d.bus.WriteRegister(uint8(d.Address), UNIT_SEL, []byte{byte(config.FusionDataFormat) | byte(config.AccelUnit) | byte(config.AngularRateUnit) | byte(config.EulerAngleUnit) | byte(config.TemperatureUnit)})
+	d.temperatureUnit = config.TemperatureUnit
+	d.angularRateUnit = config.AngularRateUnit
+	d.accelUnit = config.AccelUnit
+	time.Sleep(10 * time.Millisecond)
+
+	// Set Axis Mapping
+	d.bus.WriteRegister(uint8(d.Address), AXIS_MAP_CONFIG, []byte{byte(config.AxisMapping)})
+	time.Sleep(10 * time.Millisecond)
+
+	// Set Axis Sign
+	d.bus.WriteRegister(uint8(d.Address), AXIS_MAP_SIGN, []byte{byte(config.AxisSign)})
+	time.Sleep(10 * time.Millisecond)
+
+	// Use External Clock
+	if config.UseExternalClock {
+		d.bus.WriteRegister(uint8(d.Address), SYS_TRIGGER, []byte{0x80})
+	} else {
+		d.bus.WriteRegister(uint8(d.Address), SYS_TRIGGER, []byte{0x00})
+	}
+	time.Sleep(10 * time.Millisecond)
+
+	// default mode -- fusion 9 deg of freedom
+	d.SetMode(OPERATION_MODE_NDOF)
 }
 
 // Connected returns whether a BNO055 has been found.
 // It does a device id request and checks the response.
 func (d *Device) Connected() bool {
 	data := d.buf[:1]
-	d.bus.ReadRegister(uint8(d.Address), REG_DEV_ID, data)
+	d.bus.ReadRegister(uint8(d.Address), REG_CHIP_ID, data)
 	return data[0] == BNO055Id
 }
 
@@ -70,7 +189,6 @@ func (d *Device) Connected() bool {
 //
 // Refer to table 3.3 on page 30 of the datasheet
 func (d *Device) SetMode(mode byte) {
-	d.mode = mode
 	d.bus.WriteRegister(uint8(d.Address), OPR_MODE, []byte{mode})
 	time.Sleep(30 * time.Millisecond)
 }
@@ -79,12 +197,11 @@ func (d *Device) SetMode(mode byte) {
 func (d *Device) GetMode() byte {
 	data := d.buf[:1]
 	d.bus.ReadRegister(uint8(d.Address), OPR_MODE, data)
-	d.mode = data[0]
-	return d.mode
+	return data[0]
 }
 
 // GetSystemStatus returns information about the system status, self test results, and system errors
-func (d *Device) GetSystemStatus(systemStatus bool, selfTestResult bool, systemError bool) (system uint8, selfTest uint8, sysError uint8) {
+func (d *Device) GetStatus(systemStatus bool, selfTestResult bool, systemError bool) (system uint8, selfTest uint8, sysError uint8) {
 	system = 0
 	selfTest = 0
 	sysError = 0
@@ -120,10 +237,29 @@ func (d *Device) GetCalibrationStatus() (system bool, gyro bool, accel bool, mag
 }
 
 // ReadTemperature returns the current chip temperature
-func (d *Device) ReadTemperature() int8 {
+func (d *Device) ReadTemperature() float64 {
 	data := d.buf[:1]
 	d.bus.ReadRegister(uint8(d.Address), TEMPERATURE, data)
-	return int8(data[0])
+	scale := TempScaleC
+	if d.temperatureUnit == TEMPERATURE_UNIT_F {
+		scale = TempScaleF
+	}
+	return float64(int8(data[0])) / scale
+}
+
+// ReadQuaternion reads the current absolute orientation as a quaternion and returns it
+func (d *Device) ReadQuaternion() (w, x, y, z float64, err error) {
+	data := d.buf[:8]
+	d.bus.ReadRegister(uint8(d.Address), QUATERNION_W_LSB, data)
+	if err != nil {
+		return 0, 0, 0, 0, err
+	}
+
+	w = float64((uint16(data[1])<<8)|uint16(data[0])) * QuaternionScale
+	x = float64((uint16(data[3])<<8)|uint16(data[2])) * QuaternionScale
+	y = float64((uint16(data[5])<<8)|uint16(data[4])) * QuaternionScale
+	z = float64((uint16(data[7])<<8)|uint16(data[6])) * QuaternionScale
+	return
 }
 
 func (d *Device) readVector(register uint8) (x float64, y float64, z float64, err error) {
@@ -137,41 +273,36 @@ func (d *Device) readVector(register uint8) (x float64, y float64, z float64, er
 	yInt := int16(data[2]) | int16(data[3])<<8
 	zInt := int16(data[4]) | int16(data[5])<<8
 
+	var scale float64 = 0
+
 	switch register {
 	case MAG_X_LSB:
-		fallthrough
+		scale = MagScale
 	case GYRO_X_LSB:
+		scale = GyroScaleDegrees
+		if d.angularRateUnit == ANGULAR_RATE_UNIT_RAD_SEC {
+			scale = GyroScaleRadians
+		}
 		fallthrough
 	case EULER_H_LSB:
-		x = float64(xInt) / 16.0
-		y = float64(yInt) / 16.0
-		z = float64(zInt) / 16.0
+		scale = EulerScaleDegrees
+		if d.angularRateUnit == ANGULAR_RATE_UNIT_RAD_SEC {
+			scale = EulerScaleRadians
+		}
 	case ACCEL_X_LSB:
 		fallthrough
 	case ACCEL_OFFSET_X_LSB:
 		fallthrough
 	case GRAVITY_X_LSB:
-		x = float64(xInt) / 100.0
-		y = float64(yInt) / 100.0
-		z = float64(zInt) / 100.0
+		scale = LinearAccelScaleMeterSec
+		if d.accelUnit == ACCEL_UNIT_MICRO_G {
+			scale = AccelScaleMicroGrav
+		}
 	}
+	x = float64(xInt) / scale
+	y = float64(yInt) / scale
+	z = float64(zInt) / scale
 
-	return
-}
-
-// ReadQuaternion reads the current absolute orientation as a quaternion and returns it
-func (d *Device) ReadQuaternion() (w, x, y, z float64, err error) {
-	const scale float64 = (1.0 / (1 << 14))
-	data := d.buf[:8]
-	d.bus.ReadRegister(uint8(d.Address), QUATERNION_W_LSB, data)
-	if err != nil {
-		return 0, 0, 0, 0, err
-	}
-
-	w = float64((uint16(data[1])<<8)|uint16(data[0])) * scale
-	x = float64((uint16(data[3])<<8)|uint16(data[2])) * scale
-	y = float64((uint16(data[5])<<8)|uint16(data[4])) * scale
-	z = float64((uint16(data[7])<<8)|uint16(data[6])) * scale
 	return
 }
 
@@ -203,51 +334,4 @@ func (d *Device) ReadRotation() (x, y, z float64, err error) {
 func (d *Device) ReadGyro() (x, y, z float64, err error) {
 	x, y, z, err = d.readVector(GYRO_X_LSB)
 	return
-}
-
-// SetPowerLevel sets the power level of the sensor. Options are:
-//
-//	POWER_MODE_NORMAL -- All sensors for the operating mode are always on
-//	POWER_MODE_LOWPOWER -- Only the accelerometer is active until motion is detected
-//	POWER_MODE_SUSPEND -- All sensors are put to sleep. Manual power level change is required to exit
-//
-// See the datasheet for more details
-func (d *Device) SetPowerLevel(power byte) {
-	currentMode := d.mode
-	d.SetMode(OPERATION_MODE_CONFIG)
-	time.Sleep(25 * time.Millisecond)
-
-	d.bus.WriteRegister(uint8(d.Address), PWR_MODE, []byte{power})
-	time.Sleep(10 * time.Millisecond)
-
-	d.SetMode(currentMode)
-	time.Sleep(20 * time.Millisecond)
-}
-
-// SetAxisMapping sets the axis configuration for the sensor.
-// See the datasheet for the options available.
-func (d *Device) SetAxisMapping(axisMap byte, axisSign byte) {
-	currentMode := d.mode
-	d.SetMode(OPERATION_MODE_CONFIG)
-	d.bus.WriteRegister(uint8(d.Address), AXIS_MAP_CONFIG, []byte{axisMap})
-	time.Sleep(10 * time.Millisecond)
-	d.bus.WriteRegister(uint8(d.Address), AXIS_MAP_SIGN, []byte{axisSign})
-	time.Sleep(10 * time.Millisecond)
-	d.SetMode(currentMode)
-	time.Sleep(20 * time.Millisecond)
-}
-
-// SetUseExtCrystal tells the sensor whether or not to use an external 32KHz clock source
-func (d *Device) SetUseExtCrystal(useExt bool) {
-	currentMode := d.mode
-	d.SetMode(OPERATION_MODE_CONFIG)
-	d.bus.WriteRegister(uint8(d.Address), REG_PAGE_ID, []byte{0x00})
-	if useExt {
-		d.bus.WriteRegister(uint8(d.Address), SYS_TRIGGER, []byte{0x80})
-	} else {
-		d.bus.WriteRegister(uint8(d.Address), SYS_TRIGGER, []byte{0x00})
-	}
-	time.Sleep(10 * time.Millisecond)
-	d.SetMode(currentMode)
-	time.Sleep(20 * time.Millisecond)
 }
