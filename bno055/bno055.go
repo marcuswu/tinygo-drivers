@@ -4,6 +4,7 @@
 package bno055
 
 import (
+	"errors"
 	"time"
 
 	"tinygo.org/x/drivers"
@@ -11,8 +12,7 @@ import (
 
 type Device struct {
 	bus             drivers.I2C
-	Address         uint16
-	buf             [8]uint8
+	Address         uint8
 	temperatureUnit TemperatureUnit
 	angularRateUnit AngularRateUnit
 	accelUnit       AccelUnit
@@ -79,7 +79,7 @@ func New(bus drivers.I2C) Device {
 	// Create device with default configuration
 	return Device{
 		bus:     bus,
-		Address: AddressLow,
+		Address: Address,
 	}
 }
 
@@ -94,79 +94,172 @@ func DefaultConfig() Configuration {
 }
 
 // Configure sets up the device
-func (d *Device) Configure(config Configuration) {
-	d.doConfigure(config)
+func (d Device) Configure(config Configuration) (err error) {
+	err = d.doConfigure(config)
+	if err != nil {
+		return
+	}
 
 	// Reset interrupt status bits
-	d.bus.WriteRegister(uint8(d.Address), SYS_TRIGGER, []byte{0x20})
+	err = d.bus.WriteRegister(d.Address, SYS_TRIGGER, []byte{0x20})
 	time.Sleep(60 * time.Millisecond)
+	if err != nil {
+		return err
+	}
 
 	// run self test
-	d.bus.WriteRegister(uint8(d.Address), SYS_TRIGGER, []byte{0x00})
+	err = d.bus.WriteRegister(d.Address, SYS_TRIGGER, []byte{0x00})
 	time.Sleep(10 * time.Millisecond)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
-func (d *Device) doConfigure(config Configuration) {
-	d.SetMode(OPERATION_MODE_CONFIG)
+func (d Device) doConfigure(config Configuration) (err error) {
+	// Wait for chip to boot
+	r := []byte{0}
+	timeout := 850
+	for timeout = 850; timeout > 0; timeout -= 10 {
+		if d.bus.Tx(uint16(d.Address), nil, r) == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if timeout <= 0 {
+		return errors.New("Timeout waiting for BNO055 to boot")
+	}
+
+	// Check chip id
+	d.bus.ReadRegister(d.Address, REG_CHIP_ID, r)
+	if r[0] != BNO055Id {
+		time.Sleep(time.Second) // wait further for boot
+		d.bus.ReadRegister(d.Address, REG_CHIP_ID, r)
+		if r[0] != BNO055Id {
+			return errors.New("Timeout waiting for BNO055 to identify")
+		}
+	}
+
+	err = d.SetMode(OPERATION_MODE_CONFIG)
+	if err != nil {
+		return err
+	}
+
+	// reset
+	d.bus.WriteRegister(d.Address, SYS_TRIGGER, []byte{0x20})
+	time.Sleep(30 * time.Millisecond)
+
+	r[0] = 0
+	d.bus.ReadRegister(d.Address, REG_CHIP_ID, r)
+	for err != nil && r[0] == BNO055Id {
+		d.bus.ReadRegister(d.Address, REG_CHIP_ID, r)
+		time.Sleep(10 * time.Millisecond)
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	err = d.bus.WriteRegister(d.Address, PWR_MODE, []byte{POWER_MODE_NORMAL})
+	if err != nil {
+		return err
+	}
+	time.Sleep(10 * time.Millisecond)
 
 	// Configure Page 1 registers
-	d.bus.WriteRegister(uint8(d.Address), REG_PAGE_ID, []byte{0x01})
+	err = d.bus.WriteRegister(uint8(d.Address), REG_PAGE_ID, []byte{0x01})
 	time.Sleep(10 * time.Millisecond)
+	if err != nil {
+		return err
+	}
 
 	// Set Accelerometer config
-	d.bus.WriteRegister(uint8(d.Address), ACCEL_CONFIG, []byte{byte(config.AccelRange) | byte(config.AccelBandwidth) | byte(config.AccelMode)})
+	err = d.bus.WriteRegister(uint8(d.Address), ACCEL_CONFIG, []byte{byte(config.AccelRange) | byte(config.AccelBandwidth) | byte(config.AccelMode)})
 	time.Sleep(10 * time.Millisecond)
+	if err != nil {
+		return err
+	}
 
 	// Set Gyro config
-	d.bus.WriteRegister(uint8(d.Address), GYRO_CONFIG_0, []byte{byte(config.GyroRange) | byte(config.GyroBandwidth)})
+	err = d.bus.WriteRegister(uint8(d.Address), GYRO_CONFIG_0, []byte{byte(config.GyroRange) | byte(config.GyroBandwidth)})
 	time.Sleep(10 * time.Millisecond)
-	d.bus.WriteRegister(uint8(d.Address), GYRO_CONFIG_1, []byte{byte(config.GyroMode)})
+	if err != nil {
+		return err
+	}
+	err = d.bus.WriteRegister(uint8(d.Address), GYRO_CONFIG_1, []byte{byte(config.GyroMode)})
 	time.Sleep(10 * time.Millisecond)
+	if err != nil {
+		return err
+	}
 
 	// Set Magnetometer config
-	d.bus.WriteRegister(uint8(d.Address), MAG_CONFIG, []byte{byte(config.MagRate) | byte(config.MagMode) | byte(config.MagPower)})
+	err = d.bus.WriteRegister(uint8(d.Address), MAG_CONFIG, []byte{byte(config.MagRate) | byte(config.MagMode) | byte(config.MagPower)})
 	time.Sleep(10 * time.Millisecond)
+	if err != nil {
+		return err
+	}
 
 	// Configure Page 0 registers
-	d.bus.WriteRegister(uint8(d.Address), REG_PAGE_ID, []byte{0x00})
+	err = d.bus.WriteRegister(uint8(d.Address), REG_PAGE_ID, []byte{0x00})
 	time.Sleep(10 * time.Millisecond)
+	if err != nil {
+		return err
+	}
 
 	// Set power mode
-	d.bus.WriteRegister(uint8(d.Address), PWR_MODE, []byte{byte(config.PowerMode)})
+	err = d.bus.WriteRegister(uint8(d.Address), PWR_MODE, []byte{byte(config.PowerMode)})
 	time.Sleep(10 * time.Millisecond)
+	if err != nil {
+		return err
+	}
 
 	// Set Unit selection
-	d.bus.WriteRegister(uint8(d.Address), UNIT_SEL, []byte{byte(config.FusionDataFormat) | byte(config.AccelUnit) | byte(config.AngularRateUnit) | byte(config.EulerAngleUnit) | byte(config.TemperatureUnit)})
+	err = d.bus.WriteRegister(uint8(d.Address), UNIT_SEL, []byte{byte(config.FusionDataFormat) | byte(config.AccelUnit) | byte(config.AngularRateUnit) | byte(config.EulerAngleUnit) | byte(config.TemperatureUnit)})
 	d.temperatureUnit = config.TemperatureUnit
 	d.angularRateUnit = config.AngularRateUnit
 	d.accelUnit = config.AccelUnit
 	time.Sleep(10 * time.Millisecond)
+	if err != nil {
+		return err
+	}
 
 	// Set Axis Mapping
-	d.bus.WriteRegister(uint8(d.Address), AXIS_MAP_CONFIG, []byte{byte(config.AxisMapping)})
+	err = d.bus.WriteRegister(uint8(d.Address), AXIS_MAP_CONFIG, []byte{byte(config.AxisMapping)})
 	time.Sleep(10 * time.Millisecond)
+	if err != nil {
+		return err
+	}
 
 	// Set Axis Sign
-	d.bus.WriteRegister(uint8(d.Address), AXIS_MAP_SIGN, []byte{byte(config.AxisSign)})
+	err = d.bus.WriteRegister(uint8(d.Address), AXIS_MAP_SIGN, []byte{byte(config.AxisSign)})
 	time.Sleep(10 * time.Millisecond)
+	if err != nil {
+		return err
+	}
 
 	// Use External Clock
 	if config.UseExternalClock {
-		d.bus.WriteRegister(uint8(d.Address), SYS_TRIGGER, []byte{0x80})
+		err = d.bus.WriteRegister(uint8(d.Address), SYS_TRIGGER, []byte{0x80})
 	} else {
-		d.bus.WriteRegister(uint8(d.Address), SYS_TRIGGER, []byte{0x00})
+		err = d.bus.WriteRegister(uint8(d.Address), SYS_TRIGGER, []byte{0x00})
 	}
 	time.Sleep(10 * time.Millisecond)
+	if err != nil {
+		return err
+	}
 
 	// default mode -- fusion 9 deg of freedom
-	d.SetMode(OPERATION_MODE_NDOF)
+	err = d.SetMode(OPERATION_MODE_NDOF)
+	if err != nil {
+		return err
+	}
+	time.Sleep(20 * time.Millisecond)
+	return nil
 }
 
 // Connected returns whether a BNO055 has been found.
 // It does a device id request and checks the response.
-func (d *Device) Connected() bool {
-	data := d.buf[:1]
-	d.bus.ReadRegister(uint8(d.Address), REG_CHIP_ID, data)
+func (d Device) Connected() bool {
+	data := []byte{0}
+	d.bus.ReadRegister(d.Address, REG_CHIP_ID, data)
 	return data[0] == BNO055Id
 }
 
@@ -188,46 +281,43 @@ func (d *Device) Connected() bool {
 //	OPERATION_MODE_NDOF
 //
 // Refer to table 3.3 on page 30 of the datasheet
-func (d *Device) SetMode(mode byte) {
-	d.bus.WriteRegister(uint8(d.Address), OPR_MODE, []byte{mode})
-	time.Sleep(30 * time.Millisecond)
+func (d Device) SetMode(mode byte) (err error) {
+	return d.bus.WriteRegister(d.Address, OPR_MODE, []byte{mode})
 }
 
 // GetMode Retrieves the current mode
-func (d *Device) GetMode() byte {
-	data := d.buf[:1]
-	d.bus.ReadRegister(uint8(d.Address), OPR_MODE, data)
+func (d Device) GetMode() byte {
+	data := []byte{0}
+	d.bus.ReadRegister(d.Address, OPR_MODE, data)
 	return data[0]
 }
 
 // GetSystemStatus returns information about the system status, self test results, and system errors
-func (d *Device) GetStatus(systemStatus bool, selfTestResult bool, systemError bool) (system uint8, selfTest uint8, sysError uint8) {
+func (d Device) GetStatus(systemStatus bool, selfTestResult bool, systemError bool) (system uint8, selfTest uint8, sysError uint8) {
 	system = 0
 	selfTest = 0
 	sysError = 0
-	d.bus.WriteRegister(uint8(d.Address), REG_PAGE_ID, []byte{0x00})
+	data := []byte{0}
+	d.bus.WriteRegister(d.Address, REG_PAGE_ID, []byte{0x00})
 	if systemStatus {
-		data := d.buf[:1]
-		d.bus.ReadRegister(uint8(d.Address), SYS_STAT, data)
+		d.bus.ReadRegister(d.Address, SYS_STAT, data)
 		system = data[0]
 	}
 	if selfTestResult {
-		data := d.buf[:1]
-		d.bus.ReadRegister(uint8(d.Address), SELFTEST_RESULT, data)
+		d.bus.ReadRegister(d.Address, SELFTEST_RESULT, data)
 		selfTest = data[0]
 	}
 	if systemError {
-		data := d.buf[:1]
-		d.bus.ReadRegister(uint8(d.Address), SYS_ERR, data)
+		d.bus.ReadRegister(d.Address, SYS_ERR, data)
 		sysError = data[0]
 	}
 	return
 }
 
 // GetCalibrationStatus returns whether the system, gyro, accelerometer, and the magnetometer are calibrated
-func (d *Device) GetCalibrationStatus() (system bool, gyro bool, accel bool, mag bool) {
-	data := d.buf[:1]
-	d.bus.ReadRegister(uint8(d.Address), CALIB_STAT, data)
+func (d Device) GetCalibrationStatus() (system bool, gyro bool, accel bool, mag bool) {
+	data := []byte{0}
+	d.bus.ReadRegister(d.Address, CALIB_STAT, data)
 	system = (data[0]>>6)&0x03 > 0
 	gyro = (data[0]>>4)&0x03 > 0
 	accel = (data[0]>>2)&0x03 > 0
@@ -238,8 +328,8 @@ func (d *Device) GetCalibrationStatus() (system bool, gyro bool, accel bool, mag
 
 // ReadTemperature returns the current chip temperature
 func (d *Device) ReadTemperature() float64 {
-	data := d.buf[:1]
-	d.bus.ReadRegister(uint8(d.Address), TEMPERATURE, data)
+	data := []byte{0}
+	d.bus.ReadRegister(d.Address, TEMPERATURE, data)
 	scale := TempScaleC
 	if d.temperatureUnit == TEMPERATURE_UNIT_F {
 		scale = TempScaleF
@@ -249,8 +339,8 @@ func (d *Device) ReadTemperature() float64 {
 
 // ReadQuaternion reads the current absolute orientation as a quaternion and returns it
 func (d *Device) ReadQuaternion() (w, x, y, z float64, err error) {
-	data := d.buf[:8]
-	d.bus.ReadRegister(uint8(d.Address), QUATERNION_W_LSB, data)
+	data := make([]byte, 8)
+	err = d.bus.ReadRegister(d.Address, QUATERNION_W_LSB, data)
 	if err != nil {
 		return 0, 0, 0, 0, err
 	}
@@ -262,9 +352,9 @@ func (d *Device) ReadQuaternion() (w, x, y, z float64, err error) {
 	return
 }
 
-func (d *Device) readVector(register uint8) (x float64, y float64, z float64, err error) {
-	data := d.buf[:6]
-	d.bus.ReadRegister(uint8(d.Address), register, data)
+func (d Device) readVector(register uint8) (x float64, y float64, z float64, err error) {
+	data := make([]byte, 6)
+	err = d.bus.ReadRegister(d.Address, register, data)
 	if err != nil {
 		return 0, 0, 0, err
 	}
@@ -307,31 +397,37 @@ func (d *Device) readVector(register uint8) (x float64, y float64, z float64, er
 }
 
 // ReadLinearAcceleration returns the current linear acceleration from the sensor
-func (d *Device) ReadLinearAcceleration() (x, y, z float64, err error) {
+func (d Device) ReadLinearAcceleration() (x, y, z float64, err error) {
 	x, y, z, err = d.readVector(ACCEL_OFFSET_X_LSB)
 	return
 }
 
 // ReadAngularAcceleration returns the current angular acceleration from the sensor
-func (d *Device) ReadAngularAcceleration() (x, y, z float64, err error) {
+func (d Device) ReadAngularAcceleration() (x, y, z float64, err error) {
 	x, y, z, err = d.readVector(ACCEL_X_LSB)
 	return
 }
 
 // ReadGravityVector returns the gravity vector from the sensor
-func (d *Device) ReadGravityVector() (x, y, z float64, err error) {
+func (d Device) ReadGravityVector() (x, y, z float64, err error) {
 	x, y, z, err = d.readVector(GRAVITY_X_LSB)
 	return
 }
 
 // ReadRotation returns the current euler angle representation of absolute orientation
-func (d *Device) ReadRotation() (x, y, z float64, err error) {
+func (d Device) ReadRotation() (x, y, z float64, err error) {
 	x, y, z, err = d.readVector(EULER_H_LSB)
 	return
 }
 
 // ReadRotation returns the current gyro sensor readings
-func (d *Device) ReadGyro() (x, y, z float64, err error) {
+func (d Device) ReadGyro() (x, y, z float64, err error) {
 	x, y, z, err = d.readVector(GYRO_X_LSB)
+	return
+}
+
+// ReadRotation returns the current gyro sensor readings
+func (d Device) ReadMagneticField() (x, y, z float64, err error) {
+	x, y, z, err = d.readVector(MAG_OFFSET_X_LSB)
 	return
 }

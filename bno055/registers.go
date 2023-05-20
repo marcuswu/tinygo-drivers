@@ -1,7 +1,8 @@
 package bno055
 
-const AddressLow = 0x28 // TODO: figure out what these should be
-const AddressHigh = 0x28
+// Selection of address is based on the state of the COM3 pin of the sensor
+const Address = 0x29
+const AddressAlt = 0x28
 
 const BNO055Id = 0xA0
 
